@@ -88,6 +88,7 @@ public class SpeechRecognition extends Plugin implements Constants {
     public void stop(final PluginCall call) {
         try {
             stopListening();
+            call.resolve();
         } catch (Exception ex) {
             call.reject(ex.getLocalizedMessage());
         }
@@ -191,9 +192,11 @@ public class SpeechRecognition extends Plugin implements Constants {
                             speechRecognizer = null;
                         }
 
+                        previousPartialResults = new JSONArray();
                         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(bridge.getActivity());
                         SpeechRecognitionListener listener = new SpeechRecognitionListener();
                         listener.setCall(call);
+                        listener.setRecognizer(speechRecognizer);
                         listener.setPartialResults(partialResults);
                         speechRecognizer.setRecognitionListener(listener);
                         speechRecognizer.startListening(intent);
@@ -216,10 +219,7 @@ public class SpeechRecognition extends Plugin implements Constants {
             .post(() -> {
                 try {
                     SpeechRecognition.this.lock.lock();
-                    if (SpeechRecognition.this.listening) {
-                        speechRecognizer.stopListening();
-                        SpeechRecognition.this.listening(false);
-                    }
+                    endSession(null);
                 } catch (Exception ex) {
                     throw ex;
                 } finally {
@@ -228,10 +228,40 @@ public class SpeechRecognition extends Plugin implements Constants {
             });
     }
 
+    // Ends the session for real: releases the recognizer (and the mic) and,
+    // once per session, tells JS via listeningState "stopped".
+    private void endSession(String error) {
+        if (speechRecognizer != null) {
+            speechRecognizer.cancel();
+            speechRecognizer.destroy();
+            speechRecognizer = null;
+        }
+        boolean wasListening = this.listening;
+        listening(false);
+        if (wasListening) {
+            JSObject ret = new JSObject();
+            ret.put("status", "stopped");
+            if (error != null) {
+                ret.put("error", error);
+            }
+            notifyListeners(LISTENING_EVENT, ret);
+        }
+    }
+
     private class SpeechRecognitionListener implements RecognitionListener {
 
         private PluginCall call;
         private boolean partialResults;
+        private SpeechRecognizer recognizer;
+
+        public void setRecognizer(SpeechRecognizer recognizer) {
+            this.recognizer = recognizer;
+        }
+
+        // A late callback from a recognizer that was already replaced must not end the new session
+        private boolean isStale() {
+            return this.recognizer != SpeechRecognition.this.speechRecognizer;
+        }
 
         public void setCall(PluginCall call) {
             this.call = call;
@@ -265,26 +295,17 @@ public class SpeechRecognition extends Plugin implements Constants {
 
         @Override
         public void onEndOfSpeech() {
-            bridge
-                .getWebView()
-                .post(() -> {
-                    try {
-                        SpeechRecognition.this.lock.lock();
-                        SpeechRecognition.this.listening(false);
-
-                        JSObject ret = new JSObject();
-                        ret.put("status", "stopped");
-                        SpeechRecognition.this.notifyListeners(LISTENING_EVENT, ret);
-                    } finally {
-                        SpeechRecognition.this.lock.unlock();
-                    }
-                });
+            // In dictation mode this fires on every pause while the recognizer keeps
+            // listening; the session really ends in onResults / onError.
         }
 
         @Override
         public void onError(int error) {
-            SpeechRecognition.this.stopListening();
+            if (isStale()) {
+                return;
+            }
             String errorMssg = getErrorText(error);
+            SpeechRecognition.this.endSession(errorMssg);
 
             if (this.call != null) {
                 call.reject(errorMssg);
@@ -305,6 +326,9 @@ public class SpeechRecognition extends Plugin implements Constants {
                         JSObject ret = new JSObject();
                         ret.put("matches", jsArray);
                         notifyListeners("partialResults", ret);
+                        if (!isStale()) {
+                            SpeechRecognition.this.endSession(null);
+                        }
                     }
                 }
             } catch (Exception ex) {
