@@ -10,8 +10,9 @@
     "android/src/main/",
     "android/build.gradle",
     "dist/",
-    "ios/Plugin/",
-    "CapacitorCommunitySpeechRecognition.podspec"
+    "ios/Sources/",
+    "CapacitorCommunitySpeechRecognition.podspec",
+    "Package.swift"
   ],
   "author": "Priyank Patel <priyank.patel@stackspace.ca>",
   "contributors": [
